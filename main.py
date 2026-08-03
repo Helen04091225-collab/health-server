@@ -14,9 +14,23 @@ BARK_KEY = os.environ.get("BARK_KEY", "")
 health_data = []
 MAX_RECORDS = 2000
 
+
+def extract_value(point, metric_name=""):
+    """从数据点提取值，处理心率等特殊格式"""
+    # 心率特殊格式：有 Min/Avg/Max，没有 qty
+    if "Avg" in point:
+        return point["Avg"]
+    if "qty" in point:
+        return point["qty"]
+    if "value" in point:
+        return point["value"]
+    return None
+
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "health-server", "records": len(health_data)}
+
 
 @app.post("/ingest")
 @app.post("/ingest/{path:path}")
@@ -44,6 +58,7 @@ async def ingest(request: Request, path: str = ""):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
 @app.get("/latest")
 async def latest(k: str = ""):
     if k != AUTH_KEY:
@@ -61,12 +76,23 @@ async def latest(k: str = ""):
         points = m.get("data", [])
         if points:
             last_point = points[-1]
-            snapshot[name] = {
-                "value": last_point.get("qty", last_point.get("value")),
+            value = extract_value(last_point, name)
+
+            entry = {
+                "value": value,
                 "date": last_point.get("date", ""),
                 "units": m.get("units", "")
             }
+            # 心率额外保留 Min/Max
+            if "Min" in last_point:
+                entry["min"] = last_point["Min"]
+            if "Max" in last_point:
+                entry["max"] = last_point["Max"]
+
+            snapshot[name] = entry
+
     return {"received_at": latest_record["received_at"], "snapshot": snapshot}
+
 
 @app.get("/query")
 async def query(k: str = "", metric: str = "", hours: int = 24):
@@ -103,27 +129,33 @@ async def query(k: str = "", metric: str = "", hours: int = 24):
         summary["metrics_available"] = [m.get("name", "") for m in metrics_list]
     return summary
 
+
 async def check_anomalies(data):
     if not BARK_KEY:
         return
     try:
         metrics_list = data.get("data", {}).get("metrics", []) or data.get("metrics", [])
         alerts = []
+
         for m in metrics_list:
             name = m.get("name", "")
             points = m.get("data", [])
             if not points:
                 continue
-            value = points[-1].get("qty")
+
+            value = extract_value(points[-1], name)
             if value is None:
                 continue
+
             if "heart_rate" in name.lower() and "resting" not in name.lower() and "variability" not in name.lower():
                 if value > 130:
                     alerts.append(f"心率偏高: {value} bpm")
                 elif value < 40:
                     alerts.append(f"心率偏低: {value} bpm")
+
             if "oxygen" in name.lower() and value < 94:
                 alerts.append(f"血氧偏低: {value}%")
+
         if alerts:
             alert_text = " | ".join(alerts)
             url = f"https://api.day.app/{BARK_KEY}/健康提醒/{alert_text}"
@@ -131,6 +163,7 @@ async def check_anomalies(data):
                 await client.get(url)
     except:
         pass
+
 
 if __name__ == "__main__":
     import uvicorn
